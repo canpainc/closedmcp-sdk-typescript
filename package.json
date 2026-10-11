@@ -33,7 +33,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && npm install --prefix template --no-save --ignore-scripts . && node --test test/*.test.mjs",
-    "lint": "npm run build"
+    "lint": "npm run build",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=20"
