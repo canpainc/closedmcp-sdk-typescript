@@ -1,0 +1,64 @@
+{
+  "name": "@closedmcp/sdk",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/canpainc/closedmcp-sdk-typescript"
+  },
+  "license": "Apache-2.0",
+  "description": "Sign-in verification and HTTP serving for ClosedMCP builders",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./fastmcp": {
+      "types": "./dist/fastmcp.d.ts",
+      "default": "./dist/fastmcp.js"
+    },
+    "./vercel": {
+      "types": "./dist/vercel.d.ts",
+      "default": "./dist/vercel.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && npm install --prefix template --no-save --ignore-scripts . && node --test test/*.test.mjs",
+    "lint": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "jose": "^6.2.12"
+  },
+  "peerDependencies": {
+    "fastmcp": "^4.22.4",
+    "mcp-handler": "^2.3.0"
+  },
+  "peerDependenciesMeta": {
+    "fastmcp": {
+      "optional": true
+    },
+    "mcp-handler": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "fastmcp": "^4.22.4",
+    "mcp-handler": "^2.3.0",
+    "typescript": "^5.9.3"
+  },
+  "homepage": "https://github.com/canpainc/closedmcp-sdk-typescript"
+}
