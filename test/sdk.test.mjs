@@ -82,15 +82,15 @@ test("refuses missing, wrong-audience, expired, overlong, disallowed-company and
   const verify = verifier();
   const now = Math.floor(Date.now() / 1000);
   const otherKey = await generateKeyPair("EdDSA", { crv: "Ed25519" });
-  for (const token of [
-    undefined,
-    await pass({ aud: "https://other.example/mcp" }),
-    await pass({ iat: now - 601, exp: now - 301 }),
-    await pass({ exp: now + 301 }),
-    await pass({ domain: "other.example", email: otherEmail }),
-    await pass({}, otherKey.privateKey),
+  for (const [name, token] of [
+    ["missing", undefined],
+    ["wrong-audience", await pass({ aud: "https://other.example/mcp" })],
+    ["expired", await pass({ iat: now - 601, exp: now - 301 })],
+    ["overlong", await pass({ iat: now, exp: now + 301 })],
+    ["disallowed-company", await pass({ domain: "other.example", email: otherEmail })],
+    ["bad-signature", await pass({}, otherKey.privateKey)],
   ]) {
-    await assert.rejects(() => verify(token && `Bearer ${token}`));
+    await assert.rejects(() => verify(token && `Bearer ${token}`), name);
   }
   assert.throws(() => verifier({ allowedDomains: [] }), /allowedDomains/);
 });
