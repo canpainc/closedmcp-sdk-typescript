@@ -40,7 +40,7 @@ The [template](template/server.mjs) is a runnable JavaScript version of this ser
 
 The wrapper handles MCP POST requests concurrently. The server factory creates a fresh `McpServer` for each request, as required by the official stateless transport. MCP GET and DELETE return `405`.
 
-The wrapper serves `/.well-known/oauth-protected-resource/mcp` for a `/mcp` resource path (and the generic metadata path). Unauthenticated MCP requests receive `401` and `WWW-Authenticate: Bearer resource_metadata="<metadata URL>"`. The verifier checks EdDSA signature using the issuer's JWKS, issuer, exact audience, expiry, five-minute maximum lifetime, required identity claims, and company domain. Keys are cached by `jose` and refreshed when an unknown key ID appears.
+The wrapper serves `/.well-known/oauth-protected-resource/mcp` for a `/mcp` resource path (and the generic metadata path). Unauthenticated MCP requests receive `401` and `WWW-Authenticate: Bearer resource_metadata="<metadata URL>"`. The verifier checks EdDSA signature using the issuer's JWKS, issuer, exact audience, expiry, five-minute maximum lifetime, required identity claims, and company domain. By default it accepts `https://closedmcp.com` and the legacy `https://closedmcp.canpai.io` issuer, using each issuer's JWKS. Setting `issuer` accepts only that issuer. Keys are cached by `jose`; unknown key IDs can trigger a refresh at most once per 30 seconds, with a 5-second fetch timeout.
 
 ## FastMCP
 
@@ -87,4 +87,4 @@ export const GET = closedMcpResourceMetadata({
 
 Use the same options for both routes. Both adapters verify every pass with `createClosedMcpVerifier`. Their tool contexts carry the verified person; `closedMcpPerson(context)` throws when no verified person is present.
 
-See the [ClosedMCP documentation](https://closedmcp.canpai.io/docs).
+See the [ClosedMCP documentation](https://closedmcp.com/docs).

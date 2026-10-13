@@ -23,6 +23,7 @@ const issuer = "https://issuer.example";
 let keyPair;
 let jwksServer;
 let jwksUrl;
+let jwksRequests = 0;
 let template;
 
 async function port() {
@@ -34,7 +35,7 @@ async function port() {
   return value;
 }
 
-async function pass(changes = {}, key = keyPair.privateKey) {
+async function pass(changes = {}, key = keyPair.privateKey, kid = "test-key") {
   const now = Math.floor(Date.now() / 1000);
   const claims = {
     iss: issuer, aud: resource, sub: "person-123", email: emailOne,
@@ -42,7 +43,7 @@ async function pass(changes = {}, key = keyPair.privateKey) {
     exp: now + 300, jti: "pass-123", ...changes,
   };
   return new SignJWT({ email: claims.email, domain: claims.domain, org: claims.org, client: claims.client, jti: claims.jti })
-    .setProtectedHeader({ alg: "EdDSA", kid: "test-key" })
+    .setProtectedHeader({ alg: "EdDSA", kid })
     .setIssuer(claims.iss).setAudience(claims.aud).setSubject(claims.sub)
     .setIssuedAt(claims.iat).setExpirationTime(claims.exp).sign(key);
 }
@@ -51,6 +52,7 @@ before(async () => {
   keyPair = await generateKeyPair("EdDSA", { crv: "Ed25519" });
   const publicKey = { ...await exportJWK(keyPair.publicKey), kid: "test-key", alg: "EdDSA", use: "sig" };
   jwksServer = createServer((_req, res) => {
+    jwksRequests++;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ keys: [publicKey] }));
   });
@@ -76,6 +78,25 @@ test("accepts a correctly signed pass and exposes the person", async () => {
   assert.deepEqual(await verifier()(`Bearer ${await pass()}`), {
     id: "person-123", email: emailOne, company: "example.com", org: "acme", aiApp: "Test app",
   });
+});
+
+test("defaults to the current and legacy issuers, but rejects other issuers", async () => {
+  const verify = createClosedMcpVerifier({ resource, allowedDomains: ["example.com"], jwksUrl });
+  for (const iss of ["https://closedmcp.com", "https://closedmcp.canpai.io"]) {
+    assert.equal((await verify(`Bearer ${await pass({ iss })}`)).id, "person-123");
+  }
+  await assert.rejects(verify(`Bearer ${await pass({ iss: issuer })}`));
+  await assert.rejects(verifier()(`Bearer ${await pass({ iss: "https://closedmcp.com" })}`));
+});
+
+test("unknown key IDs respect the JWKS refresh cooldown", async () => {
+  const verify = verifier();
+  await verify(`Bearer ${await pass()}`);
+  const fetched = jwksRequests;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(verify(`Bearer ${await pass({}, keyPair.privateKey, "unknown-key")}`));
+  }
+  assert.equal(jwksRequests, fetched);
 });
 
 test("refuses missing, wrong-audience, expired, overlong, disallowed-company and bad-signature passes", async () => {

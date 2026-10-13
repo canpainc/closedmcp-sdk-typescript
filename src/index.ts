@@ -2,9 +2,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 
-export const CLOSEDMCP = "https://closedmcp.canpai.io";
+export const CLOSEDMCP = "https://closedmcp.com";
+const LEGACY_CLOSEDMCP = "https://closedmcp.canpai.io";
 
 export interface ClosedMcpPerson {
   id: string;
@@ -47,13 +48,19 @@ export function createClosedMcpVerifier(options: ClosedMcpOptions) {
   }
   const allowed = new Set(options.allowedDomains.map((domain) => domain.trim().toLowerCase()).filter(Boolean));
   if (allowed.size === 0) throw new Error("allowedDomains must name at least one company");
-  const issuer = options.issuer ?? CLOSEDMCP;
-  const keys = createRemoteJWKSet(new URL(options.jwksUrl ?? `${issuer}/.well-known/jwks.json`));
+  const issuers = options.issuer ? [options.issuer] : [CLOSEDMCP, LEGACY_CLOSEDMCP];
+  const keys = new Map(issuers.map((issuer) => [issuer, createRemoteJWKSet(
+    new URL(options.jwksUrl ?? `${issuer}/.well-known/jwks.json`),
+    { cooldownDuration: 30_000, timeoutDuration: 5_000 },
+  )]));
 
   return async (authorization: string | undefined): Promise<ClosedMcpPerson> => {
     const token = /^Bearer\s+(\S+)$/i.exec(authorization ?? "")?.[1];
     if (!token) throw new Error("No sign-in token");
-    const { payload } = await jwtVerify(token, keys, {
+    const issuer = decodeJwt(token).iss;
+    const issuerKeys = issuer && keys.get(issuer);
+    if (!issuerKeys) throw new Error("Unknown sign-in issuer");
+    const { payload } = await jwtVerify(token, issuerKeys, {
       algorithms: ["EdDSA"],
       issuer,
       audience: resource,
