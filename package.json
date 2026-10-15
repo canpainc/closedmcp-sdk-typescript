@@ -1,12 +1,12 @@
 {
   "name": "@closedmcp/sdk",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/canpainc/closedmcp-sdk-typescript"
   },
   "license": "Apache-2.0",
-  "description": "Sign-in verification and HTTP serving for ClosedMCP builders",
+  "description": "Sign-in verification, HTTP serving, and hosted-app helpers for ClosedMCP builders",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,6 +22,10 @@
     "./vercel": {
       "types": "./dist/vercel.d.ts",
       "default": "./dist/vercel.js"
+    },
+    "./hosted": {
+      "types": "./dist/hosted.d.ts",
+      "default": "./dist/hosted.js"
     }
   },
   "files": [
