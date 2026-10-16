@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { FastMCP } from "fastmcp";
 import {
   CHANNEL_KEY, EVENTS_KEY, HEADERS, LIMITS, caller, databaseUrl, events, hostedFastMcp,
-  liveDatabaseUrl, openChannel, tryCaller,
+  liveDatabaseUrl, openChannel, serve, tryCaller,
 } from "../dist/hosted.js";
 
 const email = ["bob", "acme.dev"].join("@");
@@ -163,4 +163,38 @@ test("FastMCP: hostedFastMcp() makes caller(context) work", async () => {
   } finally {
     await server.stop();
   }
+});
+
+function hello() {
+  const mcp = new McpServer({ name: "hello", version: "1.0.0" });
+  mcp.registerTool("hello", { description: "Say hello." }, async (extra) => ({
+    content: [{ type: "text", text: `Hello ${caller(extra).email}` }],
+  }));
+  return mcp;
+}
+
+test("serve: stateless MCP at /mcp on 0.0.0.0 by default, one server per request", async () => {
+  const server = serve(hello, { port: 0 });
+  await once(server, "listening");
+  try {
+    assert.equal(server.address().address, "0.0.0.0");
+    const url = `http://127.0.0.1:${server.address().port}/mcp`;
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: fakeHeaders } }));
+    try {
+      assert.deepEqual((await client.listTools()).tools.map((t) => t.name), ["hello"]);
+      const result = await client.callTool({ name: "hello", arguments: {} });
+      assert.equal(result.content[0].text, `Hello ${email}`);
+    } finally {
+      await client.close();
+    }
+    assert.equal((await fetch(url, { method: "GET" })).status, 405);
+    assert.equal((await fetch(url.replace("/mcp", "/other"), { method: "POST" })).status, 404);
+  } finally {
+    await new Promise((done) => server.close(done));
+  }
+});
+
+test("serve wants a factory, not a server instance", () => {
+  assert.throws(() => serve(hello()), /returns a new McpServer/);
 });
