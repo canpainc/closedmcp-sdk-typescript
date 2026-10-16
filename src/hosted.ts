@@ -1,6 +1,9 @@
 // Helpers for Serverless MCPs hosted on ClosedMCP. No network, no sign-in:
 // ClosedMCP has already checked the caller and passes them in headers.
 
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
 /** Hosted apps serve MCP here. */
 export const HOSTED_PORT = 8080;
 export const HOSTED_PATH = "/mcp";
@@ -147,6 +150,62 @@ export function events(list: HostedEvent[]): { [EVENTS_KEY]: HostedEvent[] } {
       return { topic, data: JSON.parse(json) };
     }),
   };
+}
+
+/** What `serve` needs from an MCP server: the official SDK's `McpServer` or low-level `Server`. */
+export interface ConnectableMcpServer {
+  connect(transport: StreamableHTTPServerTransport): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface ServeOptions {
+  /** Defaults to 8080, where ClosedMCP calls a hosted app. */
+  port?: number;
+  /** Defaults to 0.0.0.0; ClosedMCP cannot reach an app listening on 127.0.0.1. */
+  host?: string;
+}
+
+/**
+ * Serve MCP Streamable HTTP at `/mcp` on `0.0.0.0:8080`, stateless, as ClosedMCP expects.
+ * `createMcpServer` builds a fresh server for each request. Use it instead of a
+ * `StdioServerTransport`, which never goes live on ClosedMCP.
+ */
+export function serve(createMcpServer: () => ConnectableMcpServer, options: ServeOptions = {}): Server {
+  if (typeof createMcpServer !== "function") {
+    throw new TypeError("serve: give a function that returns a new McpServer, e.g. serve(() => build())");
+  }
+  const send = (res: ServerResponse, status: number, message: string) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }));
+  };
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    if (new URL(req.url ?? "/", "http://localhost").pathname !== HOSTED_PATH) {
+      send(res, 404, "not found");
+      return;
+    }
+    if (req.method !== "POST") {
+      send(res, 405, "method not allowed");
+      return;
+    }
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    try {
+      const mcp = createMcpServer();
+      try {
+        await mcp.connect(transport);
+        await transport.handleRequest(req, res);
+      } finally {
+        await mcp.close();
+      }
+    } catch (error) {
+      console.error("MCP request failed:", error);
+      if (!res.headersSent) send(res, 500, "internal server error");
+      else res.destroy();
+    }
+  });
+  const host = options.host ?? "0.0.0.0";
+  const port = options.port ?? HOSTED_PORT;
+  server.listen(port, host, () => console.error(`MCP server listening on http://${host}:${port}${HOSTED_PATH}`));
+  return server;
 }
 
 /** The app's PostgreSQL URL (live when published, dev in runs). Throws if no database is enabled. */
