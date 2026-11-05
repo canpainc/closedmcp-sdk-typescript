@@ -2,6 +2,14 @@
 
 A small TypeScript/Node wrapper for MCP servers using Log in with ClosedMCP. It verifies a signed pass on every MCP request and serves protected-resource metadata. It uses the official `@modelcontextprotocol/sdk` HTTP transport. No database or web framework is required.
 
+The public wrapper in 0.4.0 accepts OAuth resource access tokens with type `at+jwt`, a
+`client_id`, the `mcp:tools` scope and an audience matching the configured MCP URL.
+Company claims use the `https://closedmcp.com/claims/` namespace; the person helper
+keeps its existing fields. Old pass tokens and the implicit legacy issuer are
+rejected. The token follows RFC9068's claims and type using EdDSA; its mandatory
+RS256 support is not implemented. This is MCP OAuth, not ID-JAG/enterprise-managed
+authorization. Hosted caller helpers use their separate private contract.
+
 Install with `npm install @closedmcp/sdk @modelcontextprotocol/sdk`.
 
 ## Add to an existing official MCP server
@@ -40,7 +48,7 @@ The [template](template/server.mjs) is a runnable JavaScript version of this ser
 
 The wrapper handles MCP POST requests concurrently. The server factory creates a fresh `McpServer` for each request, as required by the official stateless transport. MCP GET and DELETE return `405`.
 
-The wrapper serves `/.well-known/oauth-protected-resource/mcp` for a `/mcp` resource path (and the generic metadata path). Unauthenticated MCP requests receive `401` and `WWW-Authenticate: Bearer resource_metadata="<metadata URL>"`. The verifier checks EdDSA signature using the issuer's JWKS, issuer, exact audience, expiry, five-minute maximum lifetime, required identity claims, and company domain. By default it accepts `https://closedmcp.com` and the legacy `https://closedmcp.canpai.io` issuer, using each issuer's JWKS. Setting `issuer` accepts only that issuer. Keys are cached by `jose`; unknown key IDs can trigger a refresh at most once per 30 seconds, with a 5-second fetch timeout.
+The wrapper serves `/.well-known/oauth-protected-resource/mcp` for a `/mcp` resource path (and the generic metadata path). Unauthenticated MCP requests receive `401` and `WWW-Authenticate: Bearer resource_metadata="<metadata URL>"`. The verifier checks EdDSA signature using the issuer's JWKS, issuer, exact audience, expiry, five-minute maximum lifetime, required identity claims, and company domain. By default it accepts only `https://closedmcp.com`. Setting `issuer` accepts only that issuer. Keys are cached by `jose`; unknown key IDs can trigger a refresh at most once per 30 seconds, with a 5-second fetch timeout.
 
 ## FastMCP
 

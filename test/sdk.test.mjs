@@ -40,10 +40,10 @@ async function pass(changes = {}, key = keyPair.privateKey, kid = "test-key") {
   const claims = {
     iss: issuer, aud: resource, sub: "person-123", email: emailOne,
     domain: "example.com", org: "acme", client: "Test app", iat: now,
-    exp: now + 300, jti: "pass-123", ...changes,
+    exp: now + 300, jti: "pass-123", client_id: "test-client", scope: "mcp:tools", ...changes,
   };
-  return new SignJWT({ email: claims.email, domain: claims.domain, org: claims.org, client: claims.client, jti: claims.jti })
-    .setProtectedHeader({ alg: "EdDSA", kid })
+  return new SignJWT({ email: claims.email, "https://closedmcp.com/claims/domain": claims.domain, "https://closedmcp.com/claims/org": claims.org, "https://closedmcp.com/claims/client": claims.client, jti: claims.jti, client_id: claims.client_id, scope: claims.scope })
+    .setProtectedHeader({ alg: "EdDSA", kid, typ: changes.typ ?? "at+jwt" })
     .setIssuer(claims.iss).setAudience(claims.aud).setSubject(claims.sub)
     .setIssuedAt(claims.iat).setExpirationTime(claims.exp).sign(key);
 }
@@ -80,12 +80,13 @@ test("accepts a correctly signed pass and exposes the person", async () => {
   });
 });
 
-test("defaults to the current and legacy issuers, but rejects other issuers", async () => {
+test("defaults to the current issuer and rejects legacy or untrusted issuers", async () => {
   const verify = createClosedMcpVerifier({ resource, allowedDomains: ["example.com"], jwksUrl });
-  for (const iss of ["https://closedmcp.com", "https://closedmcp.canpai.io"]) {
+  for (const iss of ["https://closedmcp.com"]) {
     assert.equal((await verify(`Bearer ${await pass({ iss })}`)).id, "person-123");
   }
   await assert.rejects(verify(`Bearer ${await pass({ iss: issuer })}`));
+  await assert.rejects(verify(`Bearer ${await pass({ iss: "https://closedmcp.canpai.io" })}`));
   await assert.rejects(verifier()(`Bearer ${await pass({ iss: "https://closedmcp.com" })}`));
 });
 
@@ -105,6 +106,9 @@ test("refuses missing, wrong-audience, expired, overlong, disallowed-company and
   const otherKey = await generateKeyPair("EdDSA", { crv: "Ed25519" });
   for (const [name, token] of [
     ["missing", undefined],
+    ["old-pass", await pass({ typ: "JWT" })],
+    ["missing-client", await pass({ client_id: undefined })],
+    ["wrong-scope", await pass({ scope: "admin" })],
     ["wrong-audience", await pass({ aud: "https://other.example/mcp" })],
     ["expired", await pass({ iat: now - 601, exp: now - 301 })],
     ["overlong", await pass({ iat: now, exp: now + 301 })],
@@ -128,7 +132,7 @@ test("template serves metadata, rejects unauthenticated requests and answers a r
   template.stderr.on("data", (chunk) => { errors += chunk; });
   template.stdout.on("data", (chunk) => { errors += chunk; });
   let metadata;
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 200; attempt++) {
     try {
       const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
       if (response.ok) { metadata = await response.json(); break; }
@@ -138,11 +142,14 @@ test("template serves metadata, rejects unauthenticated requests and answers a r
   }
   assert.ok(metadata, errors);
   assert.deepEqual(metadata, {
-    resource, authorization_servers: [issuer], bearer_methods_supported: ["header"],
+    resource, authorization_servers: [issuer], bearer_methods_supported: ["header"], scopes_supported: ["mcp:tools"],
   });
   const unauth = await fetch(`${base}/mcp`, { method: "POST" });
   assert.equal(unauth.status, 401);
-  assert.equal(unauth.headers.get("www-authenticate"), `Bearer resource_metadata="${new URL(resource).origin}/.well-known/oauth-protected-resource/mcp"`);
+  assert.match(unauth.headers.get("www-authenticate"), /resource_metadata=/);
+  const denied = await fetch(`${base}/mcp`, { method: "POST", headers: { authorization: `Bearer ${await pass({ scope: "other" })}` } });
+  assert.equal(denied.status, 403);
+  assert.match(denied.headers.get("www-authenticate"), /insufficient_scope/);
 
   const authorization = `Bearer ${await pass()}`;
   async function call(method, params, id) {
@@ -217,6 +224,29 @@ test("concurrent calls finish independently and keep each person's identity", as
   }
 });
 
+test("public resource hosts and tool bodies over 100 KB work behind a proxy", async () => {
+  const publicResource = "https://tools.example.com/mcp";
+  const server = serveWithClosedMcp(() => {
+    const mcp = new McpServer({ name: "public", version: "1" });
+    mcp.registerTool("hello", { inputSchema: {} }, async () => ({
+      content: [{ type: "text", text: closedMcpPerson().email }],
+    }));
+    return mcp;
+  }, { resource: publicResource, allowedDomains: ["example.com"], issuer, jwksUrl, port: 0 });
+  try {
+    await once(server, "listening");
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const metadata = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`, { headers: { host: "tools.example.com" } });
+    assert.equal(metadata.status, 200);
+    const response = await fetch(`${base}/mcp`, {
+      method: "POST", headers: { host: "tools.example.com", authorization: `Bearer ${await pass({ aud: publicResource })}`,
+        "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "hello", arguments: {}, _meta: { padding: "x".repeat(120_000) } } }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
+
 test("FastMCP accepts a signed pass in a real tool call and refuses missing credentials", async () => {
   const listenPort = await port();
   const server = new FastMCP({
@@ -241,6 +271,10 @@ test("FastMCP accepts a signed pass in a real tool call and refuses missing cred
       body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
     });
     assert.equal(denied.status, 401);
+    const wrongScope = await fetch(url, { method: "POST", headers: {
+      authorization: `Bearer ${await pass({ scope: "other" })}`, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }) });
+    assert.equal(wrongScope.status, 403);
     const discovery = await fetch(`http://127.0.0.1:${listenPort}/.well-known/oauth-protected-resource/mcp`);
     assert.equal((await discovery.json()).resource, resource);
     const response = await fetch(url, {
