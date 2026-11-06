@@ -1,11 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, type Server } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import express from "express";
+import { hostHeaderValidation } from "@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { InvalidTokenError, InsufficientScopeError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 
 export const CLOSEDMCP = "https://closedmcp.com";
-const LEGACY_CLOSEDMCP = "https://closedmcp.canpai.io";
+export const REQUIRED_SCOPE = "mcp:tools";
+const CLAIMS = "https://closedmcp.com/claims/";
 
 export interface ClosedMcpPerson {
   id: string;
@@ -40,44 +46,53 @@ export function closedMcpPerson(context?: {
   return person;
 }
 
-export function createClosedMcpVerifier(options: ClosedMcpOptions) {
+/** An official MCP SDK token verifier; person helpers retain the same shape. */
+export function createClosedMcpTokenVerifier(options: ClosedMcpOptions) {
   const { resource } = options;
   const url = new URL(resource);
-  if (!resource || !["http:", "https:"].includes(url.protocol) || url.hash || url.search) {
+  if (!resource || !["http:", "https:"].includes(url.protocol) || url.hash || url.search || url.username || url.password) {
     throw new Error("resource must be an absolute HTTP(S) MCP URL without query or fragment");
   }
   const allowed = new Set(options.allowedDomains.map((domain) => domain.trim().toLowerCase()).filter(Boolean));
   if (allowed.size === 0) throw new Error("allowedDomains must name at least one company");
-  const issuers = options.issuer ? [options.issuer] : [CLOSEDMCP, LEGACY_CLOSEDMCP];
-  const keys = new Map(issuers.map((issuer) => [issuer, createRemoteJWKSet(
-    new URL(options.jwksUrl ?? `${issuer}/.well-known/jwks.json`),
-    { cooldownDuration: 30_000, timeoutDuration: 5_000 },
-  )]));
+  const issuer = options.issuer ?? CLOSEDMCP;
+  const keys = createRemoteJWKSet(new URL(options.jwksUrl ?? `${issuer}/.well-known/jwks.json`),
+    { cooldownDuration: 30_000, timeoutDuration: 5_000 });
+  return {
+    async verifyAccessToken(token: string): Promise<AuthInfo> {
+      try {
+        const { payload } = await jwtVerify(token, keys, {
+          algorithms: ["EdDSA"], issuer, audience: resource, typ: "at+jwt", maxTokenAge: "5m",
+          requiredClaims: ["iss", "aud", "sub", "email", `${CLAIMS}domain`, `${CLAIMS}org`, "iat", "exp", "jti", "client_id", "scope"],
+        });
+        if (payload.aud !== resource) throw new Error("Wrong MCP audience");
+        if (typeof payload.iat !== "number" || typeof payload.exp !== "number" || payload.exp - payload.iat > 300 || payload.exp <= payload.iat) {
+          throw new Error("Access token lifetime is invalid");
+        }
+        const domain = payload[`${CLAIMS}domain`], org = payload[`${CLAIMS}org`], client = payload[`${CLAIMS}client`];
+        for (const value of [payload.sub, payload.email, domain, org, payload.jti, payload.client_id]) {
+          if (typeof value !== "string" || !value) throw new Error("Access token claims are invalid");
+        }
+        if (typeof payload.scope !== "string" || (client !== undefined && typeof client !== "string")) throw new Error("Access token claims are invalid");
+        if (!allowed.has((domain as string).toLowerCase())) throw new Error("Company is not allowed");
+        const person: ClosedMcpPerson = { id: payload.sub!, email: payload.email as string, company: domain as string, org: org as string, aiApp: client as string | undefined };
+        return { token, clientId: payload.client_id as string, scopes: payload.scope.split(/\s+/), expiresAt: payload.exp,
+          resource: new URL(resource), extra: { closedMcpPerson: person } };
+      } catch {
+        throw new InvalidTokenError("Invalid access token");
+      }
+    },
+  };
+}
 
+export function createClosedMcpVerifier(options: ClosedMcpOptions) {
+  const verifier = createClosedMcpTokenVerifier(options);
   return async (authorization: string | undefined): Promise<ClosedMcpPerson> => {
     const token = /^Bearer\s+(\S+)$/i.exec(authorization ?? "")?.[1];
-    if (!token) throw new Error("No sign-in token");
-    const issuer = decodeJwt(token).iss;
-    const issuerKeys = issuer && keys.get(issuer);
-    if (!issuerKeys) throw new Error("Unknown sign-in issuer");
-    const { payload } = await jwtVerify(token, issuerKeys, {
-      algorithms: ["EdDSA"],
-      issuer,
-      audience: resource,
-      maxTokenAge: "5m",
-      requiredClaims: ["iss", "aud", "sub", "email", "domain", "org", "iat", "exp", "jti"],
-    });
-    if (payload.aud !== resource) throw new Error("Wrong MCP audience");
-    if (typeof payload.iat !== "number" || typeof payload.exp !== "number" || payload.exp - payload.iat > 300 || payload.exp <= payload.iat) {
-      throw new Error("Sign-in token lifetime is invalid");
-    }
-    if (typeof payload.sub !== "string" || !payload.sub || typeof payload.email !== "string" || !payload.email ||
-        typeof payload.domain !== "string" || !payload.domain || typeof payload.org !== "string" || !payload.org ||
-        typeof payload.jti !== "string" || !payload.jti || (payload.client !== undefined && typeof payload.client !== "string")) {
-      throw new Error("Sign-in token claims are invalid");
-    }
-    if (!allowed.has(payload.domain.toLowerCase())) throw new Error("Company is not allowed");
-    return { id: payload.sub, email: payload.email, company: payload.domain, org: payload.org, aiApp: payload.client };
+    if (!token) throw new InvalidTokenError("No access token");
+    const auth = await verifier.verifyAccessToken(token);
+    if (!auth.scopes.includes(REQUIRED_SCOPE)) throw new InsufficientScopeError("Insufficient scope");
+    return auth.extra!.closedMcpPerson as ClosedMcpPerson;
   };
 }
 
@@ -87,59 +102,39 @@ export interface ServeOptions extends ClosedMcpOptions {
   host?: string;
 }
 
-/** Serve a fresh McpServer per request with a pass checked on every MCP request. */
+/** Serve a fresh McpServer with the official SDK's bearer checks on every request. */
 export function serveWithClosedMcp(createMcpServer: () => McpServer, options: ServeOptions): Server {
-  const verify = createClosedMcpVerifier(options);
+  const verifier = createClosedMcpTokenVerifier(options);
   const resourceUrl = new URL(options.resource);
   const mcpPath = resourceUrl.pathname;
   const metadataPath = `/.well-known/oauth-protected-resource${mcpPath === "/" ? "" : mcpPath}`;
   const metadataUrl = `${resourceUrl.origin}${metadataPath}`;
-  const metadata = {
-    resource: options.resource,
-    authorization_servers: [options.issuer ?? CLOSEDMCP],
-    bearer_methods_supported: ["header"],
-  };
-  const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
-    res.writeHead(status, { "content-type": "application/json", ...headers });
-    res.end(JSON.stringify(body));
-  };
-  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
-    if (req.method === "GET" && (path === metadataPath || path === "/.well-known/oauth-protected-resource")) {
-      send(res, 200, metadata);
-      return;
-    }
-    if (path !== mcpPath) {
-      send(res, 404, { error: "not found" });
-      return;
-    }
-    let person: ClosedMcpPerson;
-    try {
-      person = await verify(req.headers.authorization);
-    } catch {
-      send(res, 401, { error: "unauthorized" }, { "www-authenticate": `Bearer resource_metadata="${metadataUrl}"` });
-      return;
-    }
-    if (req.method !== "POST") {
-      send(res, 405, { error: "method not allowed" });
-      return;
-    }
+  const app = express();
+  app.use(hostHeaderValidation([resourceUrl.hostname, "localhost", "127.0.0.1", "[::1]"]));
+  app.use(express.json({ limit: "4mb" }));
+  app.get([metadataPath, "/.well-known/oauth-protected-resource"], (_req, res) => {
+    res.json({ resource: options.resource, authorization_servers: [options.issuer ?? CLOSEDMCP],
+      bearer_methods_supported: ["header"], scopes_supported: [REQUIRED_SCOPE] });
+  });
+  app.all(mcpPath, requireBearerAuth({ verifier, requiredScopes: [REQUIRED_SCOPE], resourceMetadataUrl: metadataUrl,
+    expectedResource: resourceUrl }), async (req, res) => {
+    if (req.method !== "POST") { res.status(405).json({ error: "method not allowed" }); return; }
+    const person = req.auth!.extra!.closedMcpPerson as ClosedMcpPerson;
     await people.run(person, async () => {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       try {
         const mcp = createMcpServer();
         try {
           await mcp.connect(transport);
-          await transport.handleRequest(req, res);
-        } finally {
-          await mcp.close();
-        }
+          await transport.handleRequest(req, res, req.body);
+        } finally { await mcp.close(); }
       } catch {
-        if (!res.headersSent) send(res, 500, { error: "internal server error" });
+        if (!res.headersSent) res.status(500).json({ error: "internal server error" });
         else res.destroy();
       }
     });
   });
+  const server = createServer(app);
   server.listen(options.port ?? 8787, options.host);
   return server;
 }

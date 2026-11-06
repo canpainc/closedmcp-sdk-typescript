@@ -1,5 +1,6 @@
 import type { ServerOptions } from "fastmcp";
-import { CLOSEDMCP, createClosedMcpVerifier, type ClosedMcpOptions, type ClosedMcpPerson } from "./index.js";
+import { InsufficientScopeError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { CLOSEDMCP, REQUIRED_SCOPE, createClosedMcpVerifier, type ClosedMcpOptions, type ClosedMcpPerson } from "./index.js";
 export { closedMcpPerson } from "./index.js";
 
 export type ClosedMcpFastMcpSession = { closedMcpPerson: ClosedMcpPerson };
@@ -11,7 +12,13 @@ export function closedMcpFastMcp(options: ClosedMcpOptions): Pick<ServerOptions<
     authenticate: async (request) => {
       try {
         return { closedMcpPerson: await verify(request.headers.authorization) };
-      } catch {
+      } catch (error) {
+        if (error instanceof InsufficientScopeError) {
+          const url = new URL(options.resource);
+          const metadata = `${url.origin}/.well-known/oauth-protected-resource${url.pathname === "/" ? "" : url.pathname}`;
+          throw Response.json({ error: "insufficient_scope" }, { status: 403,
+            headers: { "www-authenticate": `Bearer error="insufficient_scope", scope="${REQUIRED_SCOPE}", resource_metadata="${metadata}"` } });
+        }
         return undefined;
       }
     },
@@ -21,6 +28,7 @@ export function closedMcpFastMcp(options: ClosedMcpOptions): Pick<ServerOptions<
         resource: options.resource,
         authorizationServers: [options.issuer ?? CLOSEDMCP],
         bearerMethodsSupported: ["header"],
+        scopesSupported: [REQUIRED_SCOPE],
       },
     },
   };
